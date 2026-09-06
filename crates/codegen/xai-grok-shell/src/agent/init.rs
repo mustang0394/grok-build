@@ -245,6 +245,27 @@ fn init_process(cfg: &AgentConfig, auth_manager: &AuthManager) {
                  session artifacts will be uploaded, analytics events will not"
             );
         }
+
+        // FORK: latch the model-traffic egress proxy before any sampling client
+        // is built. `[proxy] url` wins, `GROK_PROXY_URL` is the fallback;
+        // unset/invalid = direct connections. First call wins process-wide
+        // (this `Once` runs a single time anyway). The URL itself is never
+        // logged — it may embed `user:pass@` credentials.
+        let proxy_url = cfg
+            .proxy
+            .url
+            .clone()
+            .filter(|u| !u.trim().is_empty())
+            .or_else(|| {
+                std::env::var("GROK_PROXY_URL")
+                    .ok()
+                    .filter(|u| !u.trim().is_empty())
+            });
+        tracing::info!(
+            proxy_configured = proxy_url.is_some(),
+            "egress proxy resolved"
+        );
+        xai_grok_sampler::set_egress_proxy(proxy_url);
         update_telemetry_config(cfg, auth_manager);
         // Emitted here: the event needs the client update_telemetry_config installs.
         xai_grok_telemetry::session_ctx::log_event(limits.into_event());

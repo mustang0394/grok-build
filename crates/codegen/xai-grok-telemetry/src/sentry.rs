@@ -30,7 +30,14 @@ static CONFIG: OnceLock<Config> = OnceLock::new();
 /// Call once at process start; the returned guard must outlive the process.
 /// Returns a no-op guard when `config.disabled`.
 pub fn init(config: Config) -> ClientInitGuard {
-    let config = CONFIG.get_or_init(|| config);
+    // FORK: crash reporting disabled in this fork — always take the no-op path.
+    let _ = config;
+    let config = CONFIG.get_or_init(|| Config {
+        client: "",
+        client_version: "",
+        release: "",
+        disabled: true,
+    });
 
     if config.disabled {
         return sentry::init(ClientOptions::default());

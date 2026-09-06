@@ -1,0 +1,177 @@
+# FORK: fork 后新增的发布流水线，上游没有这个文件，同步无冲突。
+#
+# 手动触发：编译 Linux / Windows x64 的 release 二进制，并发布到 GitHub Release。
+# 版本号默认在编译时查询 xAI 上游最新版本号（`https://x.ai/cli/stable`
+# 纯文本指针，见 crates/codegen/xai-grok-update/src/version.rs），
+# 也可在手动触发时通过 `version` 参数覆盖（填 `0.1.181` 这种纯 semver，不要带 v）。
+name: Build & Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Override version (e.g. 0.1.181). Empty = query latest from xAI upstream."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  BIN_PACKAGE: xai-grok-pager-bin
+  BIN_NAME: xai-grok-pager
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve version
+        id: resolve
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_VERSION" ]; then
+            VERSION="$INPUT_VERSION"
+            echo "Using manually specified version: $VERSION"
+          else
+            # Same sources as the in-app updater (version.rs: CLI_BASE_URLS):
+            # `{base}/stable` serves a plain-text semver like `0.1.181`.
+            VERSION="$(curl -fsSL --max-time 30 https://x.ai/cli/stable || true)"
+            if [ -z "$VERSION" ]; then
+              echo "Primary pointer unreachable, trying GCS fallback..."
+              VERSION="$(curl -fsSL --max-time 30 https://storage.googleapis.com/grok-build-public-artifacts/cli/stable)"
+            fi
+            VERSION="$(printf '%s' "$VERSION" | tr -d '[:space:]')"
+            echo "Latest upstream version: $VERSION"
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::Resolved version '$VERSION' is not a plain semver (expected e.g. 0.1.181)"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false # Windows is best-effort upstream; don't block the Linux artifact.
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: grok-linux-x64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: grok-win-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned by rust-toolchain.toml)
+        run: rustup show active-toolchain
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install dotslash (needed by bin/protoc codegen)
+        run: cargo install dotslash
+
+      # Windows: bin/protoc (dotslash) is not a Win32 binary, so the build
+      # script's dotslash lookup always fails there. Install a native protoc
+      # and export $PROTOC, which find_protoc() checks FIRST (see
+      # crates/build/xai-proto-build/src/find_protoc.rs), skipping dotslash.
+      - name: Install protoc (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install protoc --no-progress -y
+          try { protoc --version; $ok = $true } catch { $ok = $false }
+          if (-not $ok) {
+            echo "choco protoc unusable, falling back to direct download..."
+            $ver = "28.3"
+            $zip = "$env:RUNNER_TEMP\protoc.zip"
+            $dir = "$env:RUNNER_TEMP\protoc"
+            Invoke-WebRequest -Uri "https://github.com/protocolbuffers/protobuf/releases/download/v$ver/protoc-$ver-win64.zip" -OutFile $zip
+            Expand-Archive -Path $zip -DestinationPath $dir -Force
+            Add-Content -Path $env:GITHUB_PATH -Value "$dir\bin"
+            & "$dir\bin\protoc.exe" --version
+          }
+          $protoc = (Get-Command protoc).Source
+          echo "protoc at: $protoc"
+          protoc --version
+          Add-Content -Path $env:GITHUB_ENV -Value "PROTOC=$protoc"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        # Windows runners default to PowerShell, where `$VAR` does not expand
+        # env vars; force bash (Git Bash is preinstalled) for a uniform script.
+        shell: bash
+        env:
+          GROK_VERSION: ${{ needs.version.outputs.version }}
+        run: cargo build -p "$BIN_PACKAGE" --release --target ${{ matrix.target }}
+
+      - name: Stage asset
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp "target/${{ matrix.target }}/release/$BIN_NAME.exe" "dist/${{ matrix.asset }}"
+          else
+            cp "target/${{ matrix.target }}/release/$BIN_NAME" "dist/${{ matrix.asset }}"
+          fi
+          ls -la dist/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    # Publish whatever built (at minimum the Linux binary); Windows is best-effort.
+    if: always() && needs.version.result == 'success' && needs.build.result != 'failure' && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -la dist/
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          # No checkout in this job, so tell gh the target repo explicitly
+          # (otherwise it probes git remotes and dies with "not a git repository").
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$REPO" \
+              --title "Grok Build fork $TAG" \
+              --notes "Fork build of upstream Grok Build $TAG.
+
+          Differences from upstream in this fork:
+          - Telemetry / crash reporting / monitoring export disabled (no-ops, code kept for easy sync)
+          - Session trace / code upload disabled (always off)
+          - Automatic version self-update disabled
+          - Chat-completion \`usage\` counters tolerate explicit JSON \`null\` (parsed as 0)
+
+          Assets: \`grok-linux-x64\` (Linux x86_64), \`grok-win-x64.exe\` (Windows x86_64, best-effort)."
+          fi
+          gh release upload "$TAG" dist/* --repo "$REPO" --clobber

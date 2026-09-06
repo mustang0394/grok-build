@@ -136,19 +136,15 @@ static TELEMETRY_CLIENT: OnceLock<Mutex<Option<TelemetryClient>>> = OnceLock::ne
 /// Returns `true` when telemetry mode is `Enabled`.
 /// Used by `log_event`; product analytics events only fire in `Enabled` mode.
 pub fn is_enabled() -> bool {
-    TELEMETRY_CLIENT
-        .get()
-        .and_then(|m| m.lock().ok())
-        .is_some_and(|g| g.as_ref().is_some_and(|c| c.mode.is_enabled()))
+    // FORK: telemetry disabled in this fork — never report product analytics.
+    false
 }
 
 /// Returns `true` when telemetry mode is `Enabled` or `SessionMetrics`.
 /// Used by `session_metrics`; lifecycle events fire in both modes.
 pub fn is_session_metrics_enabled() -> bool {
-    TELEMETRY_CLIENT
-        .get()
-        .and_then(|m| m.lock().ok())
-        .is_some_and(|g| g.as_ref().is_some_and(|c| c.mode.session_metrics_enabled()))
+    // FORK: telemetry disabled in this fork — never report session metrics.
+    false
 }
 
 pub struct UserContext {
@@ -457,6 +453,10 @@ pub fn init(
     subscription_tier: Option<String>,
     http_client: reqwest::Client,
 ) {
+    // FORK: telemetry disabled in this fork — force Disabled so no client is
+    // ever created (original body below is untouched for clean upstream merges).
+    let _ = mode;
+    let mode = TelemetryMode::Disabled;
     let lock = TELEMETRY_CLIENT.get_or_init(|| Mutex::new(None));
     let mut guard = lock.lock().unwrap_or_else(|err| err.into_inner());
     *guard = if mode.is_disabled() {
@@ -491,6 +491,10 @@ pub fn init_if_needed(
     subscription_tier: Option<String>,
     http_client: reqwest::Client,
 ) {
+    // FORK: telemetry disabled in this fork — force Disabled so this stays a
+    // no-op (original body below is untouched for clean upstream merges).
+    let _ = mode;
+    let mode = TelemetryMode::Disabled;
     if mode.is_disabled() {
         return;
     }

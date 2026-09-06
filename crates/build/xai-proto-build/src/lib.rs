@@ -133,6 +133,18 @@ impl XaiProtoBuilder {
         includes: impl IntoIterator<Item = &'a Path>,
     ) -> anyhow::Result<()> {
         let includes = Vec::from_iter(includes);
+        let protos = Vec::from_iter(protos);
+
+        // FORK: the protoc preflight below uses Unix-only /dev paths and cannot run
+        // on Windows. Emit conservative rerun-if-changed lines instead; release CI
+        // does clean builds so the lost precision does not matter there.
+        // Non-Windows behavior is untouched.
+        if cfg!(windows) {
+            for proto in &protos {
+                println!("cargo:rerun-if-changed={}", proto.display());
+            }
+            return Ok(());
+        }
 
         if let Some(protoc) = protoc {
             println!(

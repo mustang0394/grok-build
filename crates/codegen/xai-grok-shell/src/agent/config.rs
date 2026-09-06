@@ -935,6 +935,19 @@ impl PluginsConfig {
         }
     }
 }
+/// Egress proxy for model API (sampling) traffic (`[proxy]` in config.toml).
+// FORK: added in this fork; upstream has no model-traffic proxy setting
+// (only `toolset.web_fetch.proxy_endpoint` for the web_fetch tool).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyConfig {
+    /// Env: `GROK_PROXY_URL` (fallback when unset here). `http(s)://` or
+    /// `socks5(h)://` URL, credentials may be embedded as `user:pass@`.
+    /// When set, all sampling (model) traffic goes through it.
+    /// `NO_PROXY` exception lists are not honored in v1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
 /// Feedback submission configuration (`[feedback]` in config.toml).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -1327,6 +1340,9 @@ pub struct Config {
     pub plugins: PluginsConfig,
     #[serde(default)]
     pub feedback: FeedbackConfig,
+    // FORK: `[proxy] url` egress proxy for model traffic (see `ProxyConfig`).
+    #[serde(default)]
+    pub proxy: ProxyConfig,
     #[serde(default)]
     pub paths: PathsConfig,
     #[serde(default, skip_serializing)]
@@ -1705,6 +1721,8 @@ impl Default for Config {
             compat: CompatConfigToml::default(),
             plugins: PluginsConfig::default(),
             feedback: FeedbackConfig::default(),
+            // FORK: `[proxy] url` (env fallback resolved at latch time).
+            proxy: ProxyConfig::default(),
             paths: PathsConfig::default(),
             cli: CliConfig::default(),
             models: ModelsConfig::default(),
@@ -2367,6 +2385,11 @@ impl Config {
         self.resolve_trace_upload().value
     }
     pub(crate) fn is_feedback_enabled(&self) -> bool {
+        // FORK: feedback submission disabled in this fork unless explicitly opted
+        // in via GROK_FEEDBACK_ENABLED; remote / config file cannot enable it.
+        if !env_telemetry_mode("GROK_FEEDBACK_ENABLED").is_some_and(|m| m.is_enabled()) {
+            return false;
+        }
         self.is_feature_enabled(Feature::Feedback)
     }
     pub(crate) fn is_session_recap_enabled(&self) -> bool {
@@ -2381,7 +2404,14 @@ impl Config {
     pub(crate) fn is_two_pass_compaction_enabled(&self) -> bool {
         self.is_feature_enabled(Feature::TwoPassCompaction)
     }
+    // FORK: product telemetry permanently off in this fork — env / config /
+    // remote can no longer re-enable it. This also forces `session.telemetry_enabled`
+    // (feedback signal-sync / turn deltas) and `product_analytics_enabled()` off,
+    // closing the last live-config path around the dead telemetry client.
+    // (Original body below is untouched for clean upstream merges.)
+    #[allow(unreachable_code)]
     pub(crate) fn resolve_telemetry_mode(&self) -> Resolved<TelemetryMode> {
+        return Resolved::new(TelemetryMode::Disabled, ConfigSource::Default);
         if let Some(mode) = self.requirements.telemetry.pinned() {
             return Resolved::new(mode, ConfigSource::Requirement);
         }
@@ -2403,7 +2433,11 @@ impl Config {
         }
         Resolved::new(TelemetryMode::Disabled, ConfigSource::Default)
     }
+    // FORK: trace/code upload disabled in this fork — session content must
+    // never leave the machine (original body below is untouched for merges).
+    #[allow(unreachable_code)]
     pub(crate) fn resolve_trace_upload(&self) -> Resolved<bool> {
+        return Resolved::new(false, ConfigSource::Default);
         let mode = self.resolve_telemetry_mode();
         let ff = if mode.value.is_disabled() {
             None

@@ -787,17 +787,22 @@ impl From<FinishReason> for StopReason {
 /// reads + cache writes) and `cached_prompt_tokens` is only the cache-hit subset; do not subtract.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TokenUsage {
+    // FORK: usage counters accept explicit `null` as 0 (see `serde_helpers::null_as_zero`).
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub prompt_tokens: u32,
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub completion_tokens: u32,
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub total_tokens: u32,
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub reasoning_tokens: u32,
     /// Prompt tokens served from cache (the cache-hit subset of `prompt_tokens`).
     /// OpenAI: `prompt_tokens_details.cached_tokens`. Messages: `cache_read_input_tokens`.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub cached_prompt_tokens: u32,
     /// Prompt tokens written to cache this call (Messages `cache_creation_input_tokens`, billed at ~1.25x).
     /// Part of `prompt_tokens` but distinct from cache reads; 0 on backends without a cache-write signal.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub cache_creation_prompt_tokens: u32,
 }
 

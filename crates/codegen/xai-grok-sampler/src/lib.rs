@@ -52,5 +52,7 @@ pub use retry::{
     retry_after_or_backoff, retry_backoff_with_jitter,
 };
 pub use sampling_log::AuthInfo;
+// FORK: re-exported for the `[proxy] url` startup latch (agent `init_process`).
+pub use shared_http::set_egress_proxy;
 pub use stream::{collect_response, stream_chat_completions, stream_messages, stream_responses};
 pub use types::RequestId;

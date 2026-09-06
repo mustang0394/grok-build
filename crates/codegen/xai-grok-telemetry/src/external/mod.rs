@@ -148,7 +148,9 @@ impl ExternalTelemetry {
 /// Called once from binary startup after config resolution, **before auth** (no credentials needed).
 /// `None` records the dormant state; the default path allocates nothing.
 pub fn init(cfg: Option<ExternalOtelConfig>) {
-    let value = cfg.and_then(build_handle);
+    // FORK: monitoring disabled in this fork — never activate the stream.
+    let _ = cfg;
+    let value: Option<Arc<ExternalTelemetry>> = None;
     if EXTERNAL.set(value).is_err() {
         tracing::debug!("external otel: init called more than once; keeping first registration");
     }
@@ -333,8 +335,8 @@ fn settings_gate_window_expired() -> bool {
 /// Cheap check used by the fan-out hook and the split-sink call sites: registry present AND the runtime emission gate set AND the settings gate open.
 /// A stale `true` read only costs a wasted mapping, never an export ([`emit`] re-checks).
 pub fn is_active() -> bool {
-    is_settings_gate_open()
-        && matches!(EXTERNAL.get(), Some(Some(ext)) if ext.active.load(Ordering::Relaxed))
+    // FORK: monitoring disabled in this fork.
+    false
 }
 
 /// Map and emit one typed telemetry event.

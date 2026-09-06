@@ -17,3 +17,16 @@ where
 {
     Ok(Some(Option::deserialize(deserializer)?))
 }
+
+/// Deserialize a `u32` counter that may arrive as explicit JSON `null`.
+/// Some OpenAI-compatible endpoints return `null` inside `usage` instead of omitting the field;
+/// plain `u32` rejects `null` and fails the whole response parse.
+/// `null` (and, with `#[serde(default)]`, a missing field) becomes `0`.
+/// Requires `#[serde(default, deserialize_with = "…")]`.
+// FORK: added in this fork for null-tolerant `usage` parsing.
+pub fn null_as_zero<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<u32>::deserialize(deserializer)?.unwrap_or_default())
+}

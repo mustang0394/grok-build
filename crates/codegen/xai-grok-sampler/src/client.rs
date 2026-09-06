@@ -87,6 +87,63 @@ impl GrokRequestHeaders<'_> {
     }
 }
 
+// FORK: keepalive event names sent by third-party Responses-compatible gateways.
+// They carry no model content; OpenAI's own API never sends them, so async-openai's
+// `ResponseStreamEvent` enum does not know them either.
+const HEARTBEAT_RESPONSES_EVENT_TYPES: &[&str] = &["ping", "pong", "keepalive", "heartbeat"];
+
+/// True when this raw SSE frame carries no model content and is safe to drop instead of
+/// failing the whole stream. Covers third-party keepalives (e.g. `{"type":"ping"}`) and
+/// any other *unknown* `type`, which is skipped warn-logged rather than aborting the turn —
+/// strictly better than the old behavior (`Couldn't read the response — serialization error`).
+/// Frames whose `type` IS known but whose shape is broken return `false` so they still flow
+/// into typed parsing and error as before. Never fails; `false` preserves old behavior.
+/// Same swallow pattern as `DoomLoopCollector::absorb` (SSE-name-or-payload-type precheck).
+/// NOTE: callers must run `try_parse_stream_error` FIRST — an `{"type":"error",…}` frame
+/// is "unknown" to the typed enum but must surface as a stream error, never a skip.
+// FORK: added in this fork for third-party Responses compatibility.
+fn is_droppable_responses_event(event_name: &str, data: &str) -> bool {
+    let value: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    // Own the tag: the probe parse below moves `value`, which a borrow could not survive.
+    let payload_type: Option<String> = value
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(str::to_owned);
+    // Fast path: known keepalives, by payload `type` …
+    if let Some(ref t) = payload_type
+        && HEARTBEAT_RESPONSES_EVENT_TYPES.contains(&t.as_str())
+    {
+        return true;
+    }
+    // … or by SSE `event:` name when the payload carries no `type`
+    // (some gateways send `event: ping` with `{}` data).
+    if payload_type.is_none() && HEARTBEAT_RESPONSES_EVENT_TYPES.contains(&event_name) {
+        return true;
+    }
+    let Some(t) = payload_type else {
+        return false;
+    };
+    // Generic path: `type` is present but is it one the typed enum knows?
+    // A probe parse distinguishes "unknown event kind" (drop) from "known kind,
+    // broken shape" (keep → typed parse errors as before).
+    match serde_json::from_value::<rs::ResponseStreamEvent>(value) {
+        Ok(_) => false,
+        Err(e) => {
+            // `unknown variant \`…\`` is serde's stable message for internally-tagged
+            // enums; if it ever changes shape this degrades to the old behavior (error).
+            if e.to_string().starts_with("unknown variant") {
+                tracing::warn!(event_type = %t, "dropping non-standard Responses SSE event");
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
 /// Deserialize a Responses SSE event, stripping unknown tools and rewriting terminal `total_tokens` from `context_details`.
 pub(crate) fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
     let mut event = match serde_json::from_str::<rs::ResponseStreamEvent>(data) {
@@ -1484,6 +1541,12 @@ impl SamplingClient {
                             Some(None)
                         } else if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Some(Err(stream_error)))
+                        // FORK: drop third-party keepalive / unknown-type frames instead of
+                        // failing the stream (see `is_droppable_responses_event`).
+                        // Deliberately AFTER the error parse: an `{"type":"error",…}` frame
+                        // must stay a stream error, never a silent skip.
+                        } else if is_droppable_responses_event(&event.event, data) {
+                            Some(None)
                         } else {
                             Some(Some(deserialize_response_event(data)))
                         }
@@ -2982,6 +3045,40 @@ mod tests {
         assert_eq!(usage.output_tokens_details.reasoning_tokens, 388);
         // total_tokens is rewritten to ctx.input + ctx.output (5022 + 571), not the wire's cumulative total (6714)
         assert_eq!(usage.total_tokens, 5_593);
+    }
+
+    // FORK: third-party Responses gateways inject keepalives / unknown event kinds;
+    // they must be droppable so one such frame no longer aborts the whole turn.
+    #[test]
+    fn droppable_responses_event_skips_ping_keepalive() {
+        assert!(is_droppable_responses_event(
+            "message",
+            r#"{"type":"ping"}"#
+        ));
+        // Some gateways send the keepalive as the SSE event name with an empty payload.
+        assert!(is_droppable_responses_event("ping", r#"{}"#));
+    }
+
+    #[test]
+    fn droppable_responses_event_skips_unknown_type_but_keeps_broken_known_type() {
+        // Unknown kind from a newer/different API surface: drop, don't fail the turn.
+        assert!(is_droppable_responses_event(
+            "message",
+            r#"{"type":"response.something_new","foo":1}"#
+        ));
+        // Known kind must still parse: not droppable …
+        assert!(!is_droppable_responses_event(
+            "message",
+            r#"{"type":"response.created","response":{"id":"resp_1"}}"#
+        ));
+        // … and a known kind with a broken shape must NOT be swallowed either,
+        // so real protocol damage still surfaces as a serialization error.
+        assert!(!is_droppable_responses_event(
+            "message",
+            r#"{"type":"response.completed","response":[]}"#
+        ));
+        // Unparseable frames without a `type` keep the old behavior (error).
+        assert!(!is_droppable_responses_event("message", "not json"));
     }
 
     #[test]

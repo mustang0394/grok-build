@@ -257,11 +257,14 @@ impl StopReason {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessagesUsage {
+    // FORK: usage counters accept explicit `null` as 0 (see `serde_helpers::null_as_zero`).
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub input_tokens: u32,
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub output_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub cache_creation_input_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub cache_read_input_tokens: u32,
 }
 
@@ -326,6 +329,8 @@ pub struct StopDetails {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MessageDeltaUsage {
+    // FORK: accepts explicit `null` as 0 (see `serde_helpers::null_as_zero`).
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub output_tokens: u32,
     #[serde(default)]
     pub input_tokens: Option<u32>,

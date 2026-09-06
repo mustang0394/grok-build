@@ -389,6 +389,13 @@ pub struct EnsureLatestOutcome {
 /// There the running process's version decides the download, and relaunch happens only after this pass installed something.
 /// On Windows a busy leader therefore still re-downloads hourly; only the symlink layout can prove the disk is current without exec'ing the binary.
 pub async fn ensure_latest_on_disk(update_config: &UpdateConfig) -> Result<EnsureLatestOutcome> {
+    // FORK: version self-update disabled in this fork — never check or install.
+    let _ = update_config;
+    return Ok(EnsureLatestOutcome {
+        installed: None,
+        relaunch_needed: false,
+    });
+    #[allow(unreachable_code)]
     let mut outcome = EnsureLatestOutcome {
         installed: None,
         relaunch_needed: false,
@@ -579,6 +586,10 @@ impl BackgroundUpdateCheck {
 /// When another process (an earlier TUI, the leader's hourly checker) already put the target version on disk, no download is started.
 /// Only the restart hint is shown.
 pub async fn check_update_background(update_config: &UpdateConfig) -> BackgroundUpdateCheck {
+    // FORK: version self-update disabled in this fork — never check.
+    let _ = update_config;
+    return BackgroundUpdateCheck::none();
+    #[allow(unreachable_code)]
     let Some(installer) = get_installer().await else {
         return BackgroundUpdateCheck::none();
     };
@@ -667,6 +678,10 @@ pub async fn run_update_if_available(
     trigger: CliUpdateTrigger,
     update_config: &UpdateConfig,
 ) -> Result<bool> {
+    // FORK: version self-update disabled in this fork — never check or install.
+    let _ = (run_mode, interactive, trigger, update_config);
+    return Ok(false);
+    #[allow(unreachable_code)]
     let Some(inst) = get_installer().await else {
         return Ok(false);
     };
@@ -895,12 +910,25 @@ pub fn restart_grok() -> Result<()> {
     }
 }
 
+/// User-facing explanation when a vendor install is blocked in this fork.
+fn vendor_install_blocked_message() -> String {
+    "This fork never installs from vendor (x.ai) update channels — that would replace it with official Grok Build.\n\
+     Rebuild from source instead:\n\
+       git pull && cargo build -p xai-grok-pager-bin --release  # binary: target/release/xai-grok-pager\n\
+     Or use this fork's GitHub Releases.".to_string()
+}
+
 pub async fn run_install_script(
     installer: &str,
     target: Option<&str>,
     update_config: &UpdateConfig,
     trigger: CliUpdateTrigger,
 ) -> Result<()> {
+    // FORK: last-line chokepoint — no vendor install path may proceed,
+    // including explicit `grok update` (see `run_update`).
+    let _ = (installer, target, update_config, trigger);
+    return Err(anyhow::anyhow!(vendor_install_blocked_message()));
+    #[allow(unreachable_code)]
     // What's on disk is being replaced, not this (possibly stale) process's version; npm has no trustworthy disk version, so it falls back
     let from_version =
         disk_version_for_installer(installer).unwrap_or_else(get_installed_grok_version);
@@ -2604,6 +2632,19 @@ pub async fn run_update(
     update_config: &mut UpdateConfig,
     trigger: CliUpdateTrigger,
 ) -> Result<Option<String>> {
+    // FORK: explicit `grok update` is refused in this fork (see
+    // `vendor_install_blocked_message`); it would phone vendor channels and
+    // replace this build with official Grok Build.
+    let _ = (
+        force,
+        pinned_version,
+        channel_switch,
+        update_config,
+        trigger,
+    );
+    eprintln!("{}", vendor_install_blocked_message());
+    return Ok(None);
+    #[allow(unreachable_code)]
     apply_channel_switch(channel_switch, update_config).await;
     let installer = match get_installer().await {
         Some(i) => i,

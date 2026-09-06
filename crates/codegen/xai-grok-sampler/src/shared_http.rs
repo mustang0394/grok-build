@@ -1,7 +1,9 @@
 //! Process-wide shared `reqwest::Client`s for sampling.
 //!
-//! Sharing is safe because the builders take no config-derived input.
-//! Auth, extra headers, base URL, and User-Agent are applied per-request in `SamplingClient::post`.
+//! Sharing is safe because the builders take no per-request input (auth, extra
+//! headers, base URL, and User-Agent are applied per-request in `SamplingClient::post`).
+//! The only process-wide input is the egress proxy, latched once at startup via
+//! [`set_egress_proxy`] before the first client is built.
 //! Stale connections are bounded by h2 keepalive (15s ping, 5s timeout), 90s idle-pool eviction, and the pool-less HTTP/1.1 first-retry rebuild.
 //! Connections whose per-session runtime died are discarded by hyper's checkout ready-check, with the retry loop covering the rest.
 //!
@@ -13,6 +15,78 @@ use std::time::Duration;
 
 static SHARED_H2: OnceLock<reqwest::Client> = OnceLock::new();
 static SHARED_HTTP1: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// Egress proxy URL for sampling traffic, latched once at startup.
+/// `None` (default) means direct connections.
+static EGRESS_PROXY: OnceLock<Option<String>> = OnceLock::new();
+
+/// Supported egress proxy schemes (`reqwest::Proxy::all` handles both;
+/// the `socks` reqwest feature is enabled workspace-wide).
+const EGRESS_PROXY_SCHEMES: &[&str] = &["http://", "https://", "socks5://", "socks5h://"];
+
+/// Validate + normalize a proxy URL candidate. Accepts `http(s)://` and
+/// `socks5(h)://` (credentials may be embedded as `user:pass@`).
+/// Returns `None` for empty/unsupported values. Pure: unit-tested below.
+// FORK: added in this fork for `[proxy] url` / `GROK_PROXY_URL` support.
+fn normalize_egress_proxy(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Schemes are case-insensitive (RFC 3986 §3.1); lowercase the scheme so
+    // downstream URL parsing never trips on `SOCKS5H://…`. Remainder (with
+    // possible credentials) is preserved verbatim.
+    let lower = trimmed.to_ascii_lowercase();
+    let scheme_len = EGRESS_PROXY_SCHEMES
+        .iter()
+        .find(|scheme| lower.starts_with(*scheme))
+        .map(|scheme| scheme.len());
+    let Some(scheme_len) = scheme_len else {
+        // Never log the raw value: it may embed `user:pass@` credentials.
+        let safe_proxy = trimmed.rsplit('@').next().unwrap_or(trimmed);
+        tracing::warn!(
+            proxy = %safe_proxy,
+            "ignoring egress proxy: scheme must be http(s):// or socks5(h)://"
+        );
+        return None;
+    };
+    let mut normalized = lower[..scheme_len].to_string();
+    normalized.push_str(&trimmed[scheme_len..]);
+    Some(normalized)
+}
+
+/// Latch the egress proxy for all sampling clients built afterwards.
+/// Called once from agent startup (`init_process`, every agent mode passes
+/// through it) with the resolved `[proxy] url` / `GROK_PROXY_URL` value.
+/// First call wins; later calls (e.g. subagent re-bootstrap in one process)
+/// are ignored, matching the other read-once knobs in this file.
+/// A `None`/invalid value latches direct connections.
+// FORK: added in this fork for `[proxy] url` / `GROK_PROXY_URL` support.
+pub fn set_egress_proxy(url: Option<String>) {
+    let normalized = url.as_deref().and_then(normalize_egress_proxy);
+    let _ = EGRESS_PROXY.set(normalized);
+}
+
+/// The latched egress proxy, if any.
+fn egress_proxy() -> Option<String> {
+    EGRESS_PROXY.get().cloned().flatten()
+}
+
+/// Apply the latched egress proxy to a client builder, if one is set.
+/// An unparseable URL warns and falls back to direct (a bad proxy setting
+/// must not brick the tool; validation already happened in [`set_egress_proxy`]).
+fn apply_egress_proxy(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    let Some(proxy_url) = egress_proxy() else {
+        return builder;
+    };
+    match reqwest::Proxy::all(&proxy_url) {
+        Ok(proxy) => builder.proxy(proxy),
+        Err(e) => {
+            tracing::warn!(error = %e, "egress proxy unusable, connecting directly");
+            builder
+        }
+    }
+}
 
 /// Kill switch: `GROK_SAMPLER_SHARED_CLIENT=0` (or `false`, any case) builds a fresh `reqwest::Client` per `SamplingClient` instead.
 /// Resolved once per process: the environment cannot change externally after spawn.
@@ -101,6 +175,8 @@ fn build_http_client() -> Result<reqwest::Client, reqwest::Error> {
         .unwrap_or(10);
 
     xai_grok_extra_ca::build_reqwest_client(|builder| {
+        // FORK: route sampling traffic through the latched egress proxy, if set.
+        let builder = apply_egress_proxy(builder);
         builder
             .pool_max_idle_per_host(pool_max_idle)
             .pool_idle_timeout(pool_idle_timeout())
@@ -121,6 +197,8 @@ fn build_http_client_http1() -> Result<reqwest::Client, reqwest::Error> {
         .unwrap_or(10);
 
     xai_grok_extra_ca::build_reqwest_client(|builder| {
+        // FORK: route sampling traffic through the latched egress proxy, if set.
+        let builder = apply_egress_proxy(builder);
         builder
             .http1_only()
             .pool_max_idle_per_host(0)
@@ -136,7 +214,50 @@ mod tests {
     use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use super::shared;
+    use super::{normalize_egress_proxy, shared};
+
+    // FORK: `[proxy] url` validation. Pure function tests only — the process
+    // latch (`set_egress_proxy`) is first-wins global state and must not be
+    // touched by unit tests.
+    #[test]
+    fn normalize_egress_proxy_accepts_http_and_socks() {
+        assert_eq!(
+            normalize_egress_proxy("http://proxy.corp:8080"),
+            Some("http://proxy.corp:8080".to_string())
+        );
+        assert_eq!(
+            normalize_egress_proxy("https://proxy.corp:8443"),
+            Some("https://proxy.corp:8443".to_string())
+        );
+        assert_eq!(
+            normalize_egress_proxy("socks5://127.0.0.1:1080"),
+            Some("socks5://127.0.0.1:1080".to_string())
+        );
+        assert_eq!(
+            normalize_egress_proxy("socks5h://127.0.0.1:1080"),
+            Some("socks5h://127.0.0.1:1080".to_string())
+        );
+        // Credentials embedded in the URL are preserved verbatim.
+        assert_eq!(
+            normalize_egress_proxy("http://user:p%40ss@proxy.corp:8080"),
+            Some("http://user:p%40ss@proxy.corp:8080".to_string())
+        );
+        // Case-insensitive scheme (normalized to lowercase), surrounding
+        // whitespace trimmed.
+        assert_eq!(
+            normalize_egress_proxy("  SOCKS5H://proxy.corp:1080  "),
+            Some("socks5h://proxy.corp:1080".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_egress_proxy_rejects_empty_and_unknown_schemes() {
+        assert_eq!(normalize_egress_proxy(""), None);
+        assert_eq!(normalize_egress_proxy("   "), None);
+        assert_eq!(normalize_egress_proxy("proxy.corp:8080"), None);
+        assert_eq!(normalize_egress_proxy("ftp://proxy.corp:21"), None);
+        assert_eq!(normalize_egress_proxy("socks4://127.0.0.1:1080"), None);
+    }
 
     static BUILD_CALLS: AtomicUsize = AtomicUsize::new(0);
 

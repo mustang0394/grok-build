@@ -73,6 +73,10 @@ pub fn build_otel_layer<S>(
 where
     S: tracing::Subscriber + for<'span> LookupSpan<'span>,
 {
+    // FORK: monitoring disabled in this fork — never export spans (they are
+    // still created locally, just never leave the machine).
+    let mut config = config;
+    config.exporter.enabled = false;
     let provider = TRACER_PROVIDER.get_or_init(|| build_tracer_provider(client, config));
     let tracer = provider.tracer("grok-cli");
     global::set_tracer_provider(provider.clone());

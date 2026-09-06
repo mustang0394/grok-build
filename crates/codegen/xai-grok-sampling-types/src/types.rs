@@ -526,8 +526,13 @@ impl ToolCallFunction {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Usage {
+    // FORK: `usage` counters accept explicit `null` as 0 (some OpenAI-compatible
+    // endpoints return nulls instead of omitting the field).
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub prompt_tokens: u32,
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub completion_tokens: u32,
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub total_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
@@ -541,21 +546,21 @@ pub struct Usage {
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PromptTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub cached_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub audio_tokens: u32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CompletionTokensDetails {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub reasoning_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub audio_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub accepted_prediction_tokens: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "crate::serde_helpers::null_as_zero")]
     pub rejected_prediction_tokens: u32,
 }
 // ============ Streaming types ============
@@ -1447,6 +1452,28 @@ mod tests {
         assert_eq!(delta.role, Some(Role::Assistant));
         assert_eq!(delta.content, Some("".to_string()));
         assert!(delta.tool_calls.is_empty());
+    }
+
+    // FORK: some OpenAI-compatible endpoints return explicit `null` counters
+    // inside `usage`; they must parse as 0 instead of failing the response.
+    #[test]
+    fn test_usage_deserialize_with_null_counters() {
+        let usage_json = r#"{
+            "prompt_tokens": null,
+            "completion_tokens": null,
+            "total_tokens": null,
+            "prompt_tokens_details": {"cached_tokens": null, "audio_tokens": null},
+            "completion_tokens_details": {"reasoning_tokens": null, "audio_tokens": null, "accepted_prediction_tokens": null, "rejected_prediction_tokens": null}
+        }"#;
+
+        let usage: Usage = serde_json::from_str(usage_json).expect("null usage must parse");
+        assert_eq!(usage.prompt_tokens, 0);
+        assert_eq!(usage.completion_tokens, 0);
+        assert_eq!(usage.total_tokens, 0);
+        let details = usage.prompt_tokens_details.unwrap();
+        assert_eq!(details.cached_tokens, 0);
+        let completion = usage.completion_tokens_details.unwrap();
+        assert_eq!(completion.reasoning_tokens, 0);
     }
 
     /// Regression test: cloning `Box<dyn TraceContext>` must not infinitely recurse.

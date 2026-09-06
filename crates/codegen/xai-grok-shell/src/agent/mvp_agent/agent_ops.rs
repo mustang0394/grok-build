@@ -3500,7 +3500,12 @@ impl MvpAgent {
     /// The accepted consent persists at the config tier, which those postures cannot outrank.
     /// Trace upload being off via the remote `trace_upload_enabled` default is different: that is the card's audience.
     /// Individual consent overriding a fleet default is the feature (its own kill switch is `feedback_trace_card_enabled`).
+    // FORK: one-shot feedback trace upload disabled in this fork — a feedback
+    // trace archive is session content and must never leave the machine.
+    // (Plain /feedback text is unaffected.)
+    #[allow(unreachable_code)]
     fn trace_upload_posture_allows_offer(cfg: &crate::agent::config::Config) -> bool {
+        return false;
         cfg.requirements.trace_upload.pinned() != Some(false)
             && cfg.is_telemetry_enabled()
     }

@@ -449,6 +449,12 @@ User-level configuration lives in `$GROK_HOME/config.toml` (default `~/.grok/con
 | --- | --- | --- | --- | --- |
 | `privacy.privacy_banner_acked` | `string` | `—` | `—` | RFC 3339 UTC timestamp when the local privacy banner was dismissed. The pager reads user `config.toml` only. |
 
+### `proxy` (fork addition: model-traffic egress proxy)
+
+| Key | Type / Values | Requirements | Managed | Details |
+| --- | --- | --- | --- | --- |
+| `proxy.url` | `string` | `yes` | `user` | `http(s)://` or `socks5(h)://` URL (credentials may be embedded as `user:pass@`); when set, all model API traffic goes through it. Also GROK_PROXY_URL. `NO_PROXY` exception lists are not honored. |
+
 ### `relay`
 
 | Key | Type / Values | Requirements | Managed | Details |
